@@ -1,0 +1,17 @@
+{
+  "source":"ClanedarA",
+  "sourceCredentialsFile":"a-credentials.json",
+  "destination":"CalendarB",
+  "destinationCredentialsFile":"b-credentials.json",
+  "syncOptions": {
+    "twoWaySync": false,
+    "redactedSummary": false,
+    "redactedDescription": true,
+    "redactedLocation": true,
+    "redactedAttendees": true,
+    "redactedAtatchments": true,
+    "disableReminders": true,
+    "redactedOrganizer": true,
+    "eventColor":"11"
+  }
+}
