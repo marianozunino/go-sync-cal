@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/gob"
 	"fmt"
 	"net/http"
 	"os"
@@ -19,6 +21,7 @@ type CalendarService struct {
 	vendorClientMap  map[string]*http.Client
 	vendorServiceMap map[string]*calendar.Service
 	vendorEvents     map[string][]*calendar.Event
+	persistedEvents  map[string]string
 }
 
 func (c *CalendarService) Run(options config.Config) {
@@ -31,6 +34,8 @@ func (c *CalendarService) Run(options config.Config) {
 	c.setupCalendarClients(c.options.Source, c.options.SourceCredentialsFile)
 	c.setupCalendarClients(c.options.Destination, c.options.DestinationCredentialsFile)
 
+	c.loadSerializedEvents()
+
 	if c.options.SyncOptions.TwoWaySync {
 		c.loadVendorEvents(c.options.Source)
 		c.loadVendorEvents(c.options.Destination)
@@ -42,6 +47,8 @@ func (c *CalendarService) Run(options config.Config) {
 	if c.options.SyncOptions.TwoWaySync {
 		c.importEvents(c.options.Destination, c.options.Source)
 	}
+
+	c.storeSerializedEvents()
 }
 
 func (c *CalendarService) setupCalendarClients(vendor string, credentialsFile string) {
@@ -112,8 +119,36 @@ func (c *CalendarService) filterEvents(events *calendar.Events, vendor string) {
 			}
 		}
 	}
+
+	// If event checksum is the same, skip it
+	for _, event := range c.vendorEvents[vendor] {
+		eventChecksum := c.getEventChecksum(event)
+		// is present in persisted events?
+		if _, ok := c.persistedEvents[event.Id]; !ok {
+			// add it
+			c.persistedEvents[event.Id] = eventChecksum
+			Logger.Sugar().Infof("Event %s is new, adding it", event.Id)
+			continue
+		}
+
+		if c.persistedEvents[event.Id] == eventChecksum {
+			Logger.Sugar().Infof("Event %s is the same, won't be imported", event.Id)
+			c.vendorEvents[vendor] = c.removeEvent(c.vendorEvents[vendor], event)
+		}
+	}
 }
 
+// removeEvent removes an event from a list of events
+func (c *CalendarService) removeEvent(events []*calendar.Event, event *calendar.Event) []*calendar.Event {
+	for i, e := range events {
+		if e.Id == event.Id {
+			return append(events[:i], events[i+1:]...)
+		}
+	}
+	return events
+}
+
+// importEvents imports events from source to destination, it will apply Redaction if enabled
 func (c *CalendarService) importEvents(source string, destination string) {
 	if len(c.vendorEvents[source]) == 0 {
 		Logger.Sugar().Infof("No events to import from %s to %s", source, destination)
@@ -175,4 +210,51 @@ func (c *CalendarService) importEvents(source string, destination string) {
 			Logger.Sugar().Fatalf("Unable to add event to calendar: %v", err)
 		}
 	}
+}
+
+// getEventChecksum returns a sha256 checksum of an event
+func (c *CalendarService) getEventChecksum(event *calendar.Event) string {
+	h := sha256.New()
+	h.Write([]byte(event.Summary))
+	h.Write([]byte(event.Start.DateTime))
+	h.Write([]byte(event.End.DateTime))
+	h.Write([]byte(event.Location))
+	h.Write([]byte(event.Description))
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// storeSerializedEvents serializes a map of event's ids with their checksums to a gob file
+func (c *CalendarService) storeSerializedEvents() {
+	f, err := os.Create("event_checksums.gob")
+	if err != nil {
+		Logger.Sugar().Fatalf("Unable to create checksum file: %v", err)
+	}
+	defer f.Close()
+
+	enc := gob.NewEncoder(f)
+	err = enc.Encode(c.persistedEvents)
+	if err != nil {
+		Logger.Sugar().Fatalf("Unable to serialize checksums: %v", err)
+	}
+}
+
+// loadSerializedEvents deserializes a map of event's ids with their checksums from a gob file
+func (c *CalendarService) loadSerializedEvents() {
+	f, err := os.Open("event_checksums.gob")
+	if err != nil {
+		Logger.Sugar().Debugf("Unable to open checksum file: %v", err)
+		c.persistedEvents = make(map[string]string)
+		return
+	}
+	defer f.Close()
+
+	dec := gob.NewDecoder(f)
+	var eventChecksums map[string]string
+	err = dec.Decode(&eventChecksums)
+	if err != nil {
+		Logger.Sugar().Debugf("Unable to deserialize checksums: %v", err)
+		c.persistedEvents = make(map[string]string)
+		return
+	}
+	c.persistedEvents = eventChecksums
 }
